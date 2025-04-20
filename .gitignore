@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.manifest
+*.spec
+
+# 環境管理
+.env
+.venv/
+venv/
+ENV/
+env/
+pip-log.txt
+pip-delete-this-directory.txt
+poetry.lock
+Pipfile.lock
+
+# IDE / エディタ
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OSファイル
+.DS_Store
+Thumbs.db
+
+# mypy / pytest / coverage
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# uvicorn log
+*.log
+
+# Docker
+**/__pycache__/
+docker-compose.override.yml
+*.pid
+
+# その他
+*.sqlite3
+*.db
+*.bak
