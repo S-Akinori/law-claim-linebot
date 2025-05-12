@@ -85,7 +85,7 @@ def get_user_response_dict(user_id: str) -> dict:
         if not res.data:
             return {}
 
-        return {item["id"]: item["response"] for item in res.data}
+        return {item["key"]: item["response"] for item in res.data}
 
     except Exception as e:
         print(f"エラー: {e}")

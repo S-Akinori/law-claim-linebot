@@ -16,7 +16,8 @@ from utils import (
     render_template_with_answers,
     send_email_via_mailtrap,
     get_email_template,
-    get_user_answer_response
+    get_user_answer_response,
+    get_user_response_dict
 )
 from utils_master import (
     get_master_question,
@@ -29,7 +30,6 @@ from utils_master import (
     get_master_user_response_dict,
     
 )
-from utils_compensation import handle_calculation_request
 from utils_calculate import (
     calculate_injury_compensation,
     calculate_auto_injury_compensation,
@@ -62,13 +62,18 @@ async def callback(request: Request, account_id: str = Query(...)):
     line_bot_api = LineBotApi(account["line_channel_access_token"])
 
     events = parser.parse(body.decode("utf-8"), signature)
+    use_master = account['use_master']
     for event in events:
         if isinstance(event, MessageEvent) and isinstance(event.message, TextMessage):
-            await master_handle_text(event, account, line_bot_api)
-            # await handle_text(event, account, line_bot_api)
+            if use_master:
+                await master_handle_text(event, account, line_bot_api)
+            else:
+                await handle_text(event, account, line_bot_api)
         elif isinstance(event, PostbackEvent):
-            await master_handle_postback(event, account, line_bot_api, event.reply_token)
-            # await handle_postback(event, account, line_bot_api, event.reply_token)
+            if use_master:
+                await master_handle_postback(event, account, line_bot_api, event.reply_token)
+            else:
+                await handle_postback(event, account, line_bot_api, event.reply_token)
 
     return "OK"
 
@@ -82,6 +87,7 @@ async def master_handle_text(event, account, api):
     user = get_or_create_line_user(line_id, account["id"], display_name)
     
     user_id = user["id"]
+    
 
     # トリガー対応（例：キーワードで質問開始）
     start_res = supabase.table("master_start_triggers").select("master_question_id").eq("keyword", text).execute()
@@ -98,7 +104,8 @@ async def master_handle_text(event, account, api):
         return
     
     if text == "【診断結果】":
-        responses = get_master_user_response_dict(user_id)
+        responses = get_user_response_dict(user_id)
+        print(responses)
         
         text = generate_result_message(responses)
                     
@@ -114,9 +121,10 @@ async def master_handle_text(event, account, api):
     if current_qid:
         save_master_user_response(user_id, account["id"], current_qid, response=text)
         next_qid = get_master_next_question_id_by_conditions(current_qid, user_id)
-        
-        if next_qid == "006b7220-ab96-4d81-a549-55c611846f85":
-            responses = get_master_user_response_dict(user_id)
+        master_actions_res = supabase.table("master_actions").select("*").eq("next_master_question_id", next_qid).execute()
+        master_actions_data = master_actions_res.data[0] if master_actions_res.data else None
+        if master_actions_data and master_actions_data["type"] == "calculation":
+            responses = get_user_response_dict(user_id)
             
             text = generate_result_message(responses)
                         
@@ -135,10 +143,9 @@ async def master_handle_text(event, account, api):
                 
 
         # 今の質問が最後の質問かどうか判定
-        if current_qid == "7da777b9-6100-4ea7-bdbd-9d06d9bf9d83":
-            send_final_email(user_id, account)
+        if master_actions_data and master_actions_data["type"] == "complete_notification":
+            send_master_final_email(user_id, account, master_actions_data["master_email_template_id"])
             supabase.table("line_users").update({"is_answer_complete": True}).eq("id", user_id).execute()
-
 
 
         next_q = get_master_question(account["id"], next_qid)
@@ -171,13 +178,16 @@ async def master_handle_postback(event, account, api, reply_token):
     save_master_user_response(user_id, account["id"], question_id, option_id, response)
     upsert_line_user(user_id, question_id)
 
-    if question_id == "7da777b9-6100-4ea7-bdbd-9d06d9bf9d83":
-        send_final_email(user_id, account)
-        supabase.table("line_users").update({"is_answer_complete": True}).eq("id", user_id).execute()
 
     next_qid = get_master_next_question_id_by_conditions(question_id, user_id)
+    master_actions_res = supabase.table("master_actions").select("*").eq("next_master_question_id", next_qid).execute()
+    master_actions_data = master_actions_res.data[0] if master_actions_res.data else None
+
+    if master_actions_data and master_actions_data["type"] == "complete_notification":
+        send_master_final_email(user_id, account, master_actions_data["master_email_template_id"])
+        supabase.table("line_users").update({"is_answer_complete": True}).eq("id", user_id).execute()
     
-    if next_qid == "006b7220-ab96-4d81-a549-55c611846f85":
+    if master_actions_data and master_actions_data["type"] == "calculation":
         responses = get_master_user_response_dict(user_id)
     
         text = generate_result_message(responses)
@@ -208,97 +218,192 @@ async def master_handle_postback(event, account, api, reply_token):
 
 
 async def handle_text(event, account, api):
-    user_id = event.source.user_id
+    line_id = event.source.user_id
     text = event.message.text
     reply_token = event.reply_token
+    profile = api.get_profile(line_id)
+    display_name = profile.display_name
     
-    if event.message.text == "計算結果":
-        handle_calculation_request(user_id, account, api, reply_token)
-        return
+    user = get_or_create_line_user(line_id, account["id"], display_name)
+    
+    user_id = user["id"]
+    account_id = account["id"]
 
     # トリガー対応（例：キーワードで質問開始）
-    start_res = supabase.table("start_triggers").select("question_id").eq("account_id", account["id"]).eq("keyword", text).execute()
+    start_res = supabase.table("start_triggers").select("question_id").eq("keyword", text).execute()
     if start_res.data:
         question_id = start_res.data[0]["question_id"]
-        question = get_question(account["id"], question_id)
+        question = get_question(question_id)
         options = get_options(question_id)
-        upsert_line_user(user_id, account["id"], question_id)
+        upsert_line_user(user_id, question_id)
 
         if options:
-            send_question_with_image_options(api, reply_token, question, options)
+            send_question_with_image_options(api, reply_token, question, options, account_id)
         else:
             api.reply_message(reply_token, TextSendMessage(text=question["text"]))
         return
+    
+    if text == "【診断結果】":
+        responses = get_user_response_dict(user_id)
+        
+        text = generate_result_message(responses)
+                    
+        messages = [
+            TextSendMessage(text=text),
+        ]
+        api.reply_message(reply_token, messages)
+        
+        return
 
     # 通常のテキスト回答
-    user = get_or_create_line_user(user_id, account["id"])
     current_qid = user.get("current_question_id")
     if current_qid:
         save_user_response(user_id, account["id"], current_qid, response=text)
-        next_qid = get_next_question_id_by_conditions(account["id"], current_qid, user_id)
+        next_qid = get_next_question_id_by_conditions(account_id, current_qid, user_id)
+        
+        actions_res = supabase.table("actions").select("*").eq("next_question_id", next_qid).execute()
+        actions_data = actions_res.data[0] if actions_res.data else None
+        
+        if actions_data and actions_data["type"] == "calculation":
+            responses = get_user_response_dict(user_id)
+            print( f"res.data: {responses}")
+            text = generate_result_message(responses)
+                        
+            next_q = get_question(next_qid)
+            options = get_options(next_qid)
+            upsert_line_user(user_id, next_qid)
+            messages = [
+                TextSendMessage(text=text),
+                TextSendMessage(text=next_q["text"])
+            ]
+            if options:
+                send_question_with_image_options(api, reply_token, next_q, options, account["id"])
+            else:
+                api.reply_message(reply_token, messages)
+            return
+                
 
         # 今の質問が最後の質問かどうか判定
-        if current_qid == account.get("final_question_id"):
-            send_final_email(user_id, account)
-            api.reply_message(reply_token, TextSendMessage(text="ご回答ありがとうございました。")) 
+        if actions_data and actions_data["type"] == "complete_notification":
+            send_final_email(user_id, account, actions_data["email_template_id"])
+            supabase.table("line_users").update({"is_answer_complete": True}).eq("id", user_id).execute()
 
 
-        next_q = get_question(account["id"], next_qid)
+        next_q = get_question(next_qid)
         options = get_options(next_qid)
-        upsert_line_user(user_id, account["id"], next_qid)
+        upsert_line_user(user_id, next_qid)
         if options:
-            send_question_with_image_options(api, reply_token, next_q, options)
+            send_question_with_image_options(api, reply_token, next_q, options, account["id"])
         else:
-            api.reply_message(reply_token, TextSendMessage(text=next_q["text"]))
+            placeholders = extract_placeholders(next_q["text"])
+            data = fetch_data_for_template(placeholders, account["id"])
+            rendered = render_template(next_q["text"], data)
+            api.reply_message(reply_token, TextSendMessage(text=rendered))
 
 async def handle_postback(event, account, api, reply_token):
     from urllib.parse import unquote
 
-    user_id = event.source.user_id
+    line_id = event.source.user_id
     data = dict(pair.split("=", 1) for pair in event.postback.data.split("&"))
     option_id = data.get("option_id")
     question_id = data.get("question_id")
     response = unquote(data.get("response", ""))
+    
+    account_id = account["id"]
+    
+    profile = api.get_profile(line_id)
+    display_name = profile.display_name
+    
+    user = get_or_create_line_user(line_id, account_id, display_name)
+    
+    user_id = user["id"]
 
-    save_user_response(user_id, account["id"], question_id, option_id, response)
-    upsert_line_user(user_id, account["id"], question_id)
+    save_user_response(user_id, account_id, question_id, option_id, response)
+    upsert_line_user(user_id, question_id)
 
-    if question_id == account.get("final_question_id"):
-        send_final_email(user_id, account)
-        api.reply_message(reply_token, TextSendMessage(text="ご回答ありがとうございました。"))
+    next_qid = get_next_question_id_by_conditions(account_id, question_id, user_id)
+    print(next_qid)
+    actions_res = supabase.table("actions").select("*").eq("next_question_id", next_qid).execute()
+    actions_data = actions_res.data[0] if actions_res.data else None
+
+    if actions_data and actions_data["type"] == "complete_notification":
+        send_final_email(user_id, account, actions_data["email_template_id"])
+        supabase.table("line_users").update({"is_answer_complete": True}).eq("id", user_id).execute()
+    
+    if actions_data and actions_data["type"] == "calculation":
+        responses = get_user_response_dict(user_id)
+    
+        text = generate_result_message(responses)
+                    
+        next_q = get_question(next_qid)
+        options = get_options(next_qid)
+        upsert_line_user(user_id, next_qid)
+        messages = [
+            TextSendMessage(text=text),
+            TextSendMessage(text=next_q["text"])
+        ]
+        if options:
+            send_question_with_image_options(api, reply_token, next_q, options, account["id"])
+        else:
+            api.reply_message(reply_token, messages)
         return
 
-    next_qid = get_next_question_id_by_conditions(account["id"], question_id, user_id)
-    if not next_qid:
-        send_final_email(user_id, account)
-        api.reply_message(reply_token, TextSendMessage(text="ご回答ありがとうございました。"))
-        return
-
-    next_q = get_question(account["id"], next_qid)
+    next_q = get_question(next_qid)
     options = get_options(next_qid)
-    upsert_line_user(user_id, account["id"], next_qid)
+    upsert_line_user(user_id, next_qid)
     if options:
-        send_question_with_image_options(api, reply_token, next_q, options)
+        send_question_with_image_options(api, reply_token, next_q, options, account["id"])
     else:
-        api.reply_message(reply_token, TextSendMessage(text=next_q["text"]))
+        placeholders = extract_placeholders(next_q["text"])
+        data = fetch_data_for_template(placeholders, account["id"])
+        rendered = render_template(next_q["text"], data)
+        api.reply_message(reply_token, TextSendMessage(text=rendered))
 
-def send_question_with_image_options(api, reply_token, question, options):
-    messages = [TextSendMessage(text=question["text"])]
-    columns = [
-        ImageCarouselColumn(
-            image_url=opt["image_url"],
-            action=PostbackAction(
-                label=opt["text"],
-                display_text=opt["text"],
-                data=f"option_id={opt['id']}&question_id={question['id']}&response={quote(opt['text'])}"
+def send_question_with_image_options(api, reply_token, question, options, account_id):
+    placeholders = extract_placeholders(question["text"])
+    data = fetch_data_for_template(placeholders, account_id)
+    rendered = render_template(question["text"], data)
+    messages = [TextSendMessage(text=rendered)]
+    columns = []
+    text_options = []
+
+    for opt in options:
+        
+        if opt['image_url']:
+            columns.append(
+                ImageCarouselColumn(
+                    image_url=opt['image_url'],
+                    action=PostbackAction(
+                        label=opt["text"],
+                        display_text=opt["text"],
+                        data=f"option_id={opt['id']}&question_id={question['id']}&response={quote(opt['text'])}"
+                    )
+                )
             )
-        ) for opt in options if opt.get("image_url")
-    ]
+        else:
+            text_options.append(
+                PostbackAction(
+                    label=opt["text"],
+                    display_text=opt["text"],
+                    data=f"option_id={opt['id']}&question_id={question['id']}&response={quote(opt['text'])}"
+                )
+            )
+
     if columns:
         messages.append(
             TemplateSendMessage(
                 alt_text=question["title"],
                 template=ImageCarouselTemplate(columns=columns)
+            )
+        )
+    elif text_options:
+        messages.append(
+            TemplateSendMessage(
+                alt_text=question["title"],
+                template=ButtonsTemplate(
+                    text=question["text"],
+                    actions=text_options
+                )
             )
         )
     api.reply_message(reply_token, messages)
@@ -355,18 +460,50 @@ def send_master_question_with_image_options(api, reply_token, question, options,
             )
         )
     api.reply_message(reply_token, messages)
-    
 
-def send_final_email(user_id: str, account: dict):
-    template = get_master_email_template("6a3ec14f-79d0-4762-a8a6-107a8e22e6ce")
+def send_master_final_email(user_id: str, account: dict, email_template_id: str):
+    template = get_master_email_template(email_template_id)
     # to_email = get_user_answer_response(user_id, account["id"], account["email_answer_question_id"])
-    to_email = account["email"]
-    if not to_email:
+    
+    main_email = account["email"]
+    sub_emails = account["sub_emails"]
+    to_emails = []
+    if main_email:
+        to_emails.append(main_email)
+    if sub_emails:
+        for email in sub_emails:
+            to_emails.append(email)
+    
+    if not main_email:
         return
 
     subject = render_master_template_with_answers(template["subject"], user_id)
     body = render_master_template_with_answers(template["body"], user_id)
-    send_email_via_mailtrap(to_email, subject, body)
+    
+    for to_email in to_emails:
+        send_email_via_mailtrap(to_email, subject, body)
+    
+def send_final_email(user_id: str, account: dict, email_template_id: str):
+    template = get_email_template(email_template_id)
+    # to_email = get_user_answer_response(user_id, account["id"], account["email_answer_question_id"])
+    
+    main_email = account["email"]
+    sub_emails = account["sub_emails"]
+    to_emails = []
+    if main_email:
+        to_emails.append(main_email)
+    if sub_emails:
+        for email in sub_emails:
+            to_emails.append(email)
+    
+    if not main_email:
+        return
+
+    subject = render_template_with_answers(template["subject"], user_id, account["id"])
+    body = render_template_with_answers(template["body"], user_id, account["id"])
+    
+    for to_email in to_emails:
+        send_email_via_mailtrap(to_email, subject, body)
     
 def extract_placeholders(template: str) -> set:
     """{table.column} のプレースホルダを全て抽出"""
@@ -408,43 +545,24 @@ def fetch_data_for_template(placeholders: set, account_id: str) -> dict:
 
 def generate_result_message(responses):
     
-    question_id_dict = {
-        'disablity_id': 'b796ac9c-31a7-4af4-9ab8-180976b32c20',
-        'gender_id': '46171ff3-212d-4771-9757-4a5e0e50d50b', 
-        'income_id': 'c3856e91-d602-48ce-a398-18ecff70d1ef', 
-        'marital_status_id': '2d98f15a-a964-46c5-8dba-4a18e0d6a7bc',
-        'victim_id': 'a0d898ab-1a9f-4dc1-8bf7-82667181c548',
-        'accident_id': '7c0294cb-a6ab-4e38-afd4-3e0039d2f8ab',
-        'injury_id': 'c9edae43-b444-4ff1-8eac-9b9c6eaa926b',
-        'treatment_status_id': '614ff372-98b9-4de2-9b1f-0fd000dc758d',
-        'has_income_id': '99fc3515-70bb-4699-9658-e8ca12c0ffce',
-        'hospitalization_id': '62f108be-a166-4ead-81d9-e59957fb99e1',
-        'outpatient_id': '98d4ceca-c229-476e-9454-d95bb1d24d65',
-        'actual_outpatient_id': 'e0bc0d91-1587-40df-97c2-a955a96bf6c8',
-        'day_off_id': '48eefe11-6f5e-4a87-964a-d4683dbb2d53',
-        'age_id': 'f0a157e8-b9ea-44f0-ab6e-25554bdeff40',
-        'role_id': '1cab33c2-0cce-4f6d-92ef-6b46b9f58537',
-        'dependents_id': '7b1ac05b-1e88-4b43-8ca6-2f35734ae332',
-    }
-    
-    type = responses.get(question_id_dict.get('accident_id'))
+    type = responses.get('accident_type')
     
     text = ""
     
     if type == "死亡":
-        death_compensation = calculate_death_compensation(responses.get(question_id_dict.get('role_id')))
-        relatives = int(responses.get(question_id_dict.get('dependents_id')))
-        if responses.get(question_id_dict.get('marital_status_id')) == "既婚":
+        death_compensation = calculate_death_compensation(responses('role'))
+        relatives = int(responses('dependents'))
+        if responses.get('marital_status') == "既婚":
             relatives += 1
         
-        auto_death_compensation = calculate_auto_death_compensation(int(responses.get(question_id_dict.get('dependents_id'))), relatives)
+        auto_death_compensation = calculate_auto_death_compensation(int(responses.get('dependents')), relatives)
         
         death_lost_profits = calculate_death_lost_profits(
-            int(responses.get(question_id_dict.get('income_id'))) * 10000,
-            responses.get(question_id_dict.get('role_id')),
-            responses.get(question_id_dict.get('gender_id')),
-            int(responses.get(question_id_dict.get('dependents_id'))),
-            int(responses.get(question_id_dict.get('age_id'))),
+            int(responses.get('income')) * 10000,
+            responses.get('role'),
+            responses.get('gender'),
+            int(responses.get('dependents')),
+            int(responses.get('age')),
         )
         
         auto_death_lost_profits = death_lost_profits
@@ -471,19 +589,19 @@ def generate_result_message(responses):
         )
         
     else:
-        injury_compensation = calculate_injury_compensation(int(responses.get(question_id_dict.get('hospitalization_id'))) // 30, int(responses.get(question_id_dict.get('actual_outpatient_id'))) // 30, type)
-        auto_injury_compensation = calculate_auto_injury_compensation(int(responses.get(question_id_dict.get('outpatient_id'))), int(responses.get(question_id_dict.get('actual_outpatient_id'))))
+        injury_compensation = calculate_injury_compensation(int(responses.get('hospitalization')) // 30, int(responses.get('actual_outpatient')) // 30, type)
+        auto_injury_compensation = calculate_auto_injury_compensation(int(responses.get('outpatient')), int(responses.get('actual_outpatient')))
         
-        lost_income = calculate_lost_income(int(responses.get(question_id_dict.get('income_id'))) * 10000, int(responses.get(question_id_dict.get('day_off_id'))))
-        auto_lost_income = calculate_auto_lost_income(int(responses.get(question_id_dict.get('day_off_id'))))
+        lost_income = calculate_lost_income(int(responses.get('income'))* 10000, int(responses.get('day_off')))
+        auto_lost_income = calculate_auto_lost_income(int(responses.get('day_off')))
         
-        disability_compensation_data = calculate_disability_compensation(int(responses.get(question_id_dict.get('disablity_id'))))
+        disability_compensation_data = calculate_disability_compensation(int(responses.get('disability')))
         disability_compensation = disability_compensation_data["amount_lawyer"]
         auto_disability_compensation = disability_compensation_data["amount_auto"]
         
-        lost_profits = calculate_lost_profits(int(responses.get(question_id_dict.get('income_id'))) * 10000, int(responses.get(question_id_dict.get('age_id'))), int(responses.get(question_id_dict.get('disablity_id'))), type)
+        lost_profits = calculate_lost_profits(int(responses.get('income')) * 10000, int(responses.get('age')), int(responses.get('disability')), type)
         
-        auto_disability_limit = supabase.table("auto_limit_amounts").select("amount").eq("grade", int(responses.get(question_id_dict.get('disablity_id')))).single().execute()
+        auto_disability_limit = supabase.table("auto_limit_amounts").select("amount").eq("grade", int(responses.get('disability'))).single().execute()
         auto_lost_profits = lost_profits
         
         if auto_disability_compensation + auto_lost_profits > auto_disability_limit.data["amount"]:

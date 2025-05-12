@@ -96,14 +96,14 @@ def render_master_template_with_answers(template: str, user_id: str) -> str:
 
     def replace(match):
         qid = match.group(1)
-        return response_map.get(qid, f"(未回答:{qid})")
+        return response_map.get(qid, f"(未回答)")
 
     return re.sub(pattern, replace, template)
 
 def send_email_via_mailtrap(to_email: str, subject: str, body: str):
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
-    msg["From"] = "noreply@example.com"
+    msg["From"] = "no-reply@consolatiom-money-bot.com"
     msg["To"] = to_email
 
     with smtplib.SMTP(os.getenv("MAILTRAP_HOST"), int(os.getenv("MAILTRAP_PORT"))) as server:
@@ -113,23 +113,24 @@ def send_email_via_mailtrap(to_email: str, subject: str, body: str):
 
 
 
-def get_master_user_response_dict(user_id: send_email_via_mailtrap) -> dict:
+def get_master_user_response_dict(user_id: str) -> dict:
     """
     特定ユーザーの user_responses を id: response 形式で取得
     """
     try:
         res = supabase.table("user_responses")\
-            .select("*")\
+            .select("*, master_questions(*)")\
             .eq("user_id", user_id)\
+            .not_.is_("master_question_id", None)\
             .execute()
+            
 
         if not res.data:
             return {}
 
-        return {item["master_question_id"]: item["response"] for item in res.data}
+        return {item['master_questions']['key']: item["response"] for item in res.data}
 
     except Exception as e:
         print(f"エラー: {e}")
         return {}
-    
     

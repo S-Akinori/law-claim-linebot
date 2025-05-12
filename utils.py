@@ -13,8 +13,8 @@ def get_account_info(account_id: str):
     res = supabase.table("accounts").select("*").eq("id", account_id).execute()
     return res.data[0] if res.data else None
 
-def get_question(account_id: str, question_id: str):
-    res = supabase.table("questions").select("*").eq("account_id", account_id).eq("id", question_id).execute()
+def get_question(question_id: str):
+    res = supabase.table("questions").select("*").eq("id", question_id).execute()
     return res.data[0] if res.data else None
 
 def get_options(question_id: str):
@@ -61,20 +61,21 @@ def get_next_question_id_by_conditions(account_id: str, from_question_id: str, u
         cond_res = supabase.table("conditions").select("*").eq("account_id", account_id).eq("condition_group", group).execute()
         conditions = cond_res.data
         all_match = True
+        if not conditions:
+            return route["next_question_id"]
         for cond in conditions:
             ans_res = supabase.table("user_responses").select("*").eq("user_id", user_id).eq("question_id", cond["required_question_id"]).execute()
             if not ans_res.data:
-                all_match = False
                 break
             ans = ans_res.data[0]
             if cond["required_option_id"] and cond["operator"] == "=" and ans.get("option_id") != cond["required_option_id"]:
-                all_match = False
-            elif cond["value"] is not None and ans.get("response") is not None:
+                break
+            elif cond["value"] is not None and cond["value"] != '' and ans.get("response") is not None:
                 val = cond["value"]
                 res_val = ans["response"]
                 if cond["operator"] == "=" and res_val != val:
-                    all_match = False
-        if all_match:
+                    break
+                
             return route["next_question_id"]
     return None
 
@@ -97,14 +98,14 @@ def render_template_with_answers(template: str, user_id: str, account_id: str) -
 
     def replace(match):
         qid = match.group(1)
-        return response_map.get(qid, f"(未回答:{qid})")
+        return response_map.get(qid, f"(未回答)")
 
     return re.sub(pattern, replace, template)
 
 def send_email_via_mailtrap(to_email: str, subject: str, body: str):
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
-    msg["From"] = "info@consolation-money-bot.com"
+    msg["From"] = "no-reply@consolation-money-bot.com"
     msg["To"] = to_email
 
     with smtplib.SMTP(os.getenv("MAILTRAP_HOST"), int(os.getenv("MAILTRAP_PORT"))) as server:
@@ -112,3 +113,23 @@ def send_email_via_mailtrap(to_email: str, subject: str, body: str):
         server.login(os.getenv("MAILTRAP_USERNAME"), os.getenv("MAILTRAP_PASSWORD"))
         server.send_message(msg)
 
+def get_user_response_dict(user_id: str) -> dict:
+    """
+    特定ユーザーの user_responses を id: response 形式で取得
+    """
+    try:
+        res = supabase.table("user_responses")\
+            .select("*, questions(*)")\
+            .eq("user_id", user_id)\
+            .not_.is_("question_id", None)\
+            .execute()
+            
+        print( f"res.data: {res.data}")
+        if not res.data:
+            return {}
+
+        return {item['questions']['key']: item["response"] for item in res.data}
+
+    except Exception as e:
+        print(f"エラー: {e}")
+        return {}

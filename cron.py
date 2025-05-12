@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from datetime import datetime
 from db import supabase
+from dateutil.parser import parse
 import logging
 from dateutil.parser import parse
 
@@ -14,8 +15,6 @@ async def send_scheduled_messages():
     now = datetime.now()
     current_hour = now.hour
     current_minute = now.minute
-    
-    
     
     # 15分バッファ → 許容されるhour候補: H-1, H, H+1
     hour_candidates = set()
@@ -31,11 +30,9 @@ async def send_scheduled_messages():
     accounts_res = supabase.table("accounts").select("id").execute()
     accounts = accounts_res.data if accounts_res.data else []
     
-    
-
     for account in accounts:
         account_id = account["id"]
-
+        
         # 対象ユーザー取得（回答未完了のみ）
         users_res = supabase.table("line_users").select("*").eq("account_id", account_id).eq("is_answer_complete", False).execute()
 
@@ -149,12 +146,11 @@ def fetch_data_for_template(placeholders: set, account_id: str) -> dict:
 
     for table, columns in table_columns.items():
         # account_id を持つテーブルだけに限定（必要に応じて他条件も）
+        logging.debug(f"Fetching data for table: {table}, columns: {columns}")
         if table == "accounts":
             response = supabase.table(table).select("*").eq("id", account_id).maybe_single().execute()
         else:
             response = supabase.table(table).select("*").eq("account_id", account_id).maybe_single().execute()
-            
-        logging.debug(f"Fetching data for table: {table}, columns: {columns}")
 
         if response.data:
             results[table] = response.data
