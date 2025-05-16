@@ -50,7 +50,7 @@ async def send_not_complete_messages():
             sent_res = supabase.table("line_users").select("is_email_sent").eq("id", user_id).execute()
             is_sent = sent_res.data[0]["is_email_sent"] if sent_res.data else False
             
-            if not is_sent:  
+            if not is_sent:
                 send_template_email(user_id, account, action_data[mail_template_id_key])
                 
                 # 送信済記録
@@ -80,20 +80,27 @@ def send_template_email(user_id: str, account: dict, email_template_id: str):
     if not main_email:
         return
 
-    subject = render_template_with_answers(template["subject"], user_id, account["id"])
-    body = render_template_with_answers(template["body"], user_id, account["id"])
+    subject = render_template_with_answers(template["subject"], user_id, account)
+    body = render_template_with_answers(template["body"], user_id, account)
     
     for to_email in to_emails:
         send_email_via_mailtrap(to_email, subject, body)
 
-def render_template_with_answers(template: str, user_id: str, account_id: str) -> str:
+def render_template_with_answers(template: str, user_id: str, account) -> str:
     pattern = r"\{answer:([0-9a-fA-F\-]{36})\}"
     question_ids = re.findall(pattern, template)
     if not question_ids:
         return template
-
-    res = supabase.table("user_responses").select("question_id, response").eq("user_id", user_id).in_("question_id", question_ids).execute()
-    response_map = {r["question_id"]: r["response"] for r in res.data}
+    
+    res = None
+    response_map = {}
+    
+    if account["use_master"] :
+        res = supabase.table("user_responses").select("master_question_id, response").eq("user_id", user_id).in_("master_question_id", question_ids).execute()
+        response_map = {r["master_question_id"]: r["response"] for r in res.data}
+    else:
+        res = supabase.table("user_responses").select("question_id, response").eq("user_id", user_id).in_("question_id", question_ids).execute()
+        response_map = {r["question_id"]: r["response"] for r in res.data}
 
     def replace(match):
         qid = match.group(1)
