@@ -50,3 +50,5 @@ docker-compose.override.yml
 *.sqlite3
 *.db
 *.bak
+
+credentials.json

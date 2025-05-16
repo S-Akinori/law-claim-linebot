@@ -5,6 +5,8 @@ import smtplib
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 from db import supabase
+from gspread import Spreadsheet, Worksheet
+from datetime import datetime
 
 load_dotenv()
 
@@ -21,26 +23,48 @@ def get_options(question_id: str):
     res = supabase.table("options").select("*").eq("question_id", question_id).execute()
     return res.data
 
-def get_or_create_line_user(line_id: str, account_id: str, display_name: str = None):
+def get_or_create_line_user(line_id: str, account_id: str, display_name: str = None, sheet: Worksheet = None):
     res = supabase.table("line_users").select("*").eq("line_id", line_id).eq("account_id", account_id).execute()
+    all_rows = sheet.get_all_values()
+    header = all_rows[0]
+    rows = all_rows[2:]
+    
+    id_index = header.index("id") + 1
+    line_name_index = header.index("line_name") + 1
+    date_index = header.index("date") + 1
+    target_row = None
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if res.data:
+        for i, row in enumerate(rows, start=3):
+            if row[0] == res.data[0]['id']:
+                target_row = i
+                break
+    
+        if target_row:
+            sheet.update_cell(target_row, line_name_index, display_name)
+            sheet.update_cell(target_row, date_index, now_str)
+        else:
+            sheet.append_row([res.data[0]['id'], display_name, now_str])
+        
         return res.data[0]
+        
+    else:
+        inserted = supabase.table("line_users").insert({
+            "line_id": line_id,
+            "account_id": account_id,
+            "name": display_name
+        }).execute()
+        sheet.append_row([inserted.data[0]['id'], display_name, now_str])
+    
+        return inserted.data[0] if inserted.data else None
 
-
-    inserted = supabase.table("line_users").insert({
-        "line_id": line_id,
-        "account_id": account_id,
-        "name": display_name
-    }).execute()
-
-    return inserted.data[0] if inserted.data else None
 
 
 def upsert_line_user(user_id: str, current_question_id: str):
     supabase.table("line_users").update({"current_question_id": current_question_id}).eq("id", user_id).execute()
 
 
-def save_user_response(user_id: str, account_id: str, question_id: str, option_id: str = None, response: str = None):
+def save_user_response(user_id: str, account_id: str, question_id: str, option_id: str = None, response: str = None, key: str = None, sheet: Worksheet = None ):
     if option_id and not response:
         opt = supabase.table("options").select("text").eq("id", option_id).execute()
         if opt.data:
@@ -51,7 +75,28 @@ def save_user_response(user_id: str, account_id: str, question_id: str, option_i
         supabase.table("user_responses").update({"option_id": option_id, "response": response}).eq("id", existing.data[0]["id"]).execute()
     else:
         supabase.table("user_responses").insert({"user_id": user_id, "account_id": account_id, "question_id": question_id, "option_id": option_id, "response": response}).execute()
+        
+    # === スプレッドシート処理 ===
+    if sheet:
+        all_rows = sheet.get_all_values()
 
+        header = all_rows[0]  # 2行目がヘッダー
+        user_col_index = header.index("id")
+        if key not in header:
+            raise ValueError(f"'{key}' カラムが見つかりません")
+
+        key_col_index = header.index(key)
+
+        # 3行目以降で user_id を探す
+        for idx, row in enumerate(all_rows[2:], start=3):
+            if len(row) > user_col_index and row[user_col_index] == user_id:
+                # 対象のセルを更新（1-based）
+                sheet.update_cell(idx, key_col_index + 1, response)
+                print(f"{user_id} の {key} を更新しました（行 {idx}）")
+                return
+
+        print(f"user_id '{user_id}' は見つかりませんでした")
+        
 def get_next_question_id_by_conditions(account_id: str, from_question_id: str, user_id: str):
     routes_res = supabase.table("question_routes").select("*").eq("account_id", account_id).eq("from_question_id", from_question_id).execute()
     routes = routes_res.data
