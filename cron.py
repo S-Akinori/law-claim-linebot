@@ -42,15 +42,23 @@ async def send_scheduled_messages():
         users_res = supabase.table("line_users").select("*").eq("account_id", account_id).eq("is_answer_complete", False).execute()
         msg_res = supabase.table("master_scheduled_messages").select("id, message").execute()
         data = msg_res.data if msg_res.data else []
-        import random
-
         if data:
+            import random
             random_message = random.choice(data)
-            logging.info(f"Randomly selected message: {random_message['message']}")
+            
+            for user in users_res.data:
+                user_id = user["id"]
+                line_user_id = user["line_id"]
+                placeholders = extract_placeholders(random_message["message"])
+                data = fetch_data_for_template(placeholders, account_id, user_id)
+                rendered = render_template(random_message["message"], data)
+                # メッセージ送信
+                send_line_message(line_user_id, rendered, account_id=account_id)
+            
+            return { "message": f"Sent message: {rendered}" }
         else:
-            logging.info("No messages available to select from.")
+            return { "message": "No messages found." }
         
-        return {"status": "development mode, no messages sent"}
     
     for account in accounts:
         account_id = account["id"]
@@ -86,7 +94,7 @@ async def send_scheduled_messages():
                         continue
                     
                     placeholders = extract_placeholders(msg["message"])
-                    data = fetch_data_for_template(placeholders, account_id)
+                    data = fetch_data_for_template(placeholders, account_id, user_id)
                     rendered = render_template(msg["message"], data)
 
                     # メッセージ送信
@@ -154,7 +162,7 @@ def render_template(template: str, values: dict) -> str:
 
     return re.sub(r"{([\w]+\.[\w]+)}", replacer, template)
 
-def fetch_data_for_template(placeholders: set, account_id: str) -> dict:
+def fetch_data_for_template(placeholders: set, account_id: str, user_id: str = None) -> dict:
     """テンプレートに必要なテーブルをSupabaseから取得"""
     table_columns = defaultdict(set)
 
@@ -167,9 +175,11 @@ def fetch_data_for_template(placeholders: set, account_id: str) -> dict:
 
     for table, columns in table_columns.items():
         try:
-            logging.debug(f"Fetching data for table: {table}, columns: {columns}")
+            logging.info(f"Fetching data for table: {table}, columns: {columns}")
             if table == "accounts":
                 response = supabase.table(table).select("*").eq("id", account_id).maybe_single().execute()
+            elif table == "line_users" and user_id:
+                response = supabase.table(table).select("*").eq("id", user_id).maybe_single().execute()
             else:
                 response = supabase.table(table).select("*").eq("account_id", account_id).maybe_single().execute()
 
