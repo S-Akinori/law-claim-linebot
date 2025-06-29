@@ -147,7 +147,7 @@ def send_master_final_email(user_id: str, account: dict, email_template_id: str)
     if not main_email:
         return
 
-    subject = render_master_template_with_answers(template["subject"], user_id)
+    subject = account["name"] + " - " + template["subject"]
     body = render_master_template_with_answers(template["body"], user_id)
     
     for to_email in to_emails:

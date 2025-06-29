@@ -3,12 +3,19 @@ from datetime import datetime
 from db import supabase
 from dateutil.parser import parse
 import logging
-from dateutil.parser import parse
+from postgrest.exceptions import APIError
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
 
 router = APIRouter()
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+env = os.getenv("ENV")
 
 @router.get("/scheduled-messages/send")
 async def send_scheduled_messages():
@@ -29,6 +36,21 @@ async def send_scheduled_messages():
     # アカウントごとに処理
     accounts_res = supabase.table("accounts").select("id").execute()
     accounts = accounts_res.data if accounts_res.data else []
+    
+    if(env == "development"):
+        account_id = "6ad4edfa-13e7-4357-a2cc-7e1da2168d80"
+        users_res = supabase.table("line_users").select("*").eq("account_id", account_id).eq("is_answer_complete", False).execute()
+        msg_res = supabase.table("master_scheduled_messages").select("id, message").execute()
+        data = msg_res.data if msg_res.data else []
+        import random
+
+        if data:
+            random_message = random.choice(data)
+            logging.info(f"Randomly selected message: {random_message['message']}")
+        else:
+            logging.info("No messages available to select from.")
+        
+        return {"status": "development mode, no messages sent"}
     
     for account in accounts:
         account_id = account["id"]
@@ -54,7 +76,6 @@ async def send_scheduled_messages():
                 if not msg_res.data:
                     continue
             
-
                 # 送信済みチェック
                 sent_res = supabase.table("scheduled_message_logs").select("scheduled_message_id").eq("line_user_id", user_id).execute()
 
@@ -145,16 +166,21 @@ def fetch_data_for_template(placeholders: set, account_id: str) -> dict:
     results = {}
 
     for table, columns in table_columns.items():
-        # account_id を持つテーブルだけに限定（必要に応じて他条件も）
-        logging.debug(f"Fetching data for table: {table}, columns: {columns}")
-        if table == "accounts":
-            response = supabase.table(table).select("*").eq("id", account_id).maybe_single().execute()
-        else:
-            response = supabase.table(table).select("*").eq("account_id", account_id).maybe_single().execute()
+        try:
+            logging.debug(f"Fetching data for table: {table}, columns: {columns}")
+            if table == "accounts":
+                response = supabase.table(table).select("*").eq("id", account_id).maybe_single().execute()
+            else:
+                response = supabase.table(table).select("*").eq("account_id", account_id).maybe_single().execute()
 
-        if response.data:
-            results[table] = response.data
-        else:
-            results[table] = {}
+            if response.data:
+                results[table] = response.data
+            else:
+                results[table] = {}
+        except APIError as e:
+            if e.code == '204':  # No content
+                results[table] = {}
+            else:
+                raise e
 
     return results

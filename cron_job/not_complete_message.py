@@ -19,7 +19,7 @@ router = APIRouter()
 async def send_not_complete_messages():
         
     # アカウントごとに処理
-    accounts_res = supabase.table("accounts").select("*").eq("id", "6ad4edfa-13e7-4357-a2cc-7e1da2168d80").execute()
+    accounts_res = supabase.table("accounts").select("*").execute()
     accounts = accounts_res.data if accounts_res.data else []
     
     action_res = supabase.table("master_actions").select("*").eq("type", "incomplete_notification").execute()
